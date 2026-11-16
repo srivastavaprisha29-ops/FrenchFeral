@@ -45,8 +45,10 @@ main.home{width:100%;padding-top:0}
 main:not(.home) .intro h1{font-size:clamp(3.4rem,7vw,6rem)}
 @media(max-width:900px){.shell{width:calc(100% - 48px)}.top{grid-template-columns:auto 1fr}.header-cta{display:none}.top nav{justify-self:end;gap:4px}.cover{min-height:620px}.cover-art{object-position:52% top}}
 @media(max-width:650px){.shell{width:calc(100% - 32px)}.top{display:flex;flex-direction:column;gap:10px;align-items:start;min-height:0}.cover{display:block;min-height:0;padding-bottom:190px;overflow:hidden}.cover .shell{padding-top:39px}.cover-copy{max-width:100%}.cover h1{font-size:clamp(3.6rem,15vw,6rem);margin:14px 0 16px}.cover h1 br{display:none}.cover-art{top:auto;height:285px;object-position:87% 75%;mask-image:linear-gradient(transparent,#000 35%,#000 93%,transparent)}.cover:after{background:none}.studies{padding-top:13px}.studies-head{align-items:start;gap:9px;flex-direction:column}.studies-head .ghost{padding-left:0}.scenes{grid-template-columns:repeat(2,minmax(0,1fr));row-gap:22px}.scene-name{font-size:1.65rem}.scene-arrow{margin-top:8px}.field-notes{gap:8px;font-size:.8rem}.field-notes .eyebrow{letter-spacing:.06em}}
+
+.grammar-chapter>.eyebrow{margin-top:16px}.grammar-question{margin:16px 0}.grammar-question input{width:100%;padding:10px 12px;border:1px solid #9fa89c;border-radius:4px;background:var(--white);color:var(--ink)}.grammar-question input:focus-visible{outline:3px solid var(--orange);outline-offset:3px}.grammar-result{margin:6px 0;color:var(--green)}.note a{color:var(--green)}
 </style></head><body>
-<header><div class="shell top"><div class="brand"><span class="brand-mark" aria-hidden="true">✦</span>FrenchFeral</div><nav aria-label="Main navigation"><button data-page="today">Today</button><button data-page="lessons">Lessons</button><button data-page="review">Review</button><button data-page="progress">Progress</button></nav><button class="button header-cta" data-action="daily">Start practice <span aria-hidden="true">→</span></button></div></header>
+<header><div class="shell top"><div class="brand"><span class="brand-mark" aria-hidden="true">✦</span>FrenchFeral</div><nav aria-label="Main navigation"><button data-page="today">Today</button><button data-page="lessons">Lessons</button><button data-page="grammar">Grammar</button><button data-page="review">Review</button><button data-page="progress">Progress</button></nav><button class="button header-cta" data-action="daily">Start practice <span aria-hidden="true">→</span></button></div></header>
 <main id="app" class="shell" tabindex="-1"></main><div id="notice" class="sr" role="status"></div>
 <script>
 const lessons = [
@@ -101,12 +103,32 @@ const lessons = [
 ].map(([level,title,fr,description,vocab,dialogue,prompt,answers,task,model,check],id)=>({id,level,title,fr,description,vocab,dialogue,prompt,answers,task,model,check}));
 const bands = ["","Foundations","Everyday independence","Academic conversations"];
 const key = "frenchferal.v1";
-const blank = () => ({runs:[],items:{},daily:null});
+const blank = () => ({version:2,total:0,passed:0,mastery:{},items:{},daily:null,lastDay:null,streak:0});
 let data = blank();
 let storageAvailable = true;
 try {
   const saved = JSON.parse(localStorage.getItem(key));
-  if(saved && Array.isArray(saved.runs) && saved.items) data = saved;
+  if(saved?.version===2) data=saved;
+  else if(Array.isArray(saved?.runs)){
+    const dates=new Set();
+    for(const run of saved.runs){
+      addToTotals(run.id,run.correct);
+      dates.add(run.day);
+    }
+    for(const lesson of lessons){
+      if(saved.items?.[lesson.id]) data.items[lesson.id]={weak:Boolean(saved.items[lesson.id].weak)};
+    }
+    const latest=[...dates].sort().at(-1);
+    if(latest){
+      data.lastDay=latest;
+      const cursor=new Date(latest+"T12:00:00");
+      while(dates.has(day(cursor))){data.streak++;cursor.setDate(cursor.getDate()-1);}
+    }
+    if(lessons[saved.daily?.id] && saved.daily.day===day()){
+      data.daily={day:saved.daily.day,id:saved.daily.id,complete:saved.runs.some(run=>run.day===saved.daily.day&&run.id===saved.daily.id)};
+    }
+    localStorage.setItem(key,JSON.stringify(data));
+  }
 } catch { storageAvailable = false; }
 const app = document.querySelector("#app");
 const notice = document.querySelector("#notice");
@@ -121,8 +143,21 @@ function day(date = new Date()){
 const escaped = value => String(value).replace(/[&<>"']/g,char=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char]));
 const normalize = value => value.normalize("NFD").toLowerCase().replace(/\p{M}/gu,"").replace(/[^\p{L}\p{N}]+/gu," ").trim();
 const correct = (answer,lesson) => lesson.answers.some(value=>normalize(value)===normalize(answer));
-const studied = id => data.runs.some(run=>run.id===id);
-const checked = id => data.runs.some(run=>run.id===id && run.correct);
+const studied = id => Boolean(data.mastery[id]);
+const checked = id => data.mastery[id]===2;
+function addToTotals(id,passed){
+  data.total++;
+  if(passed)data.passed++;
+  data.mastery[id]=Math.max(data.mastery[id]||0,passed?2:1);
+}
+function completeLesson(id,passed){
+  addToTotals(id,passed);
+  const today=day();
+  if(data.lastDay!==today)data.streak=data.lastDay===yesterday()?data.streak+1:1;
+  data.lastDay=today;
+  if(data.daily?.day===today && data.daily.id===id)data.daily.complete=true;
+  persist();
+}
 function level(){
   if(lessons.filter(l=>l.level===2 && checked(l.id)).length>=3) return 3;
   if(lessons.filter(l=>l.level===1 && checked(l.id)).length>=3) return 2;
@@ -131,27 +166,27 @@ function level(){
 function misses(){return lessons.filter(l=>data.items[l.id]?.weak);}
 function reviewItems(exclude=-1,limit=2){
   const seen = lessons.filter(l=>l.id!==exclude && data.items[l.id]);
-  return seen.sort((a,b)=>Number(data.items[b.id].weak)-Number(data.items[a.id].weak)||data.items[a.id].at-data.items[b.id].at).slice(0,limit);
+  return seen.sort((a,b)=>Number(data.items[b.id].weak)-Number(data.items[a.id].weak)).slice(0,limit);
 }
 function daily(){
   if(data.daily?.day===day()) return lessons[data.daily.id];
   const pool = lessons.filter(l=>l.level===level());
-  const next = pool.find(l=>!studied(l.id))||pool.find(l=>!checked(l.id))||reviewItems(-1,12).find(l=>l.level===level())||pool[0];
-  data.daily={day:day(),id:next.id};
+  const next = pool.find(l=>!studied(l.id))||pool.find(l=>!checked(l.id))||pool[Math.floor(Date.now()/86400000)%pool.length];
+  data.daily={day:day(),id:next.id,complete:false};
   persist();
   return next;
 }
 function record(id,passed){
-  data.items[id]={weak:!passed,at:Date.now()};
+  data.items[id]={weak:!passed};
   persist();
 }
+function yesterday(){
+  const date=new Date();
+  date.setDate(date.getDate()-1);
+  return day(date);
+}
 function streak(){
-  const dates=new Set(data.runs.map(r=>r.day));
-  const cursor=new Date();
-  if(!dates.has(day(cursor))) cursor.setDate(cursor.getDate()-1);
-  let count=0;
-  while(dates.has(day(cursor))){count++;cursor.setDate(cursor.getDate()-1);}
-  return count;
+  return data.lastDay===day()||data.lastDay===yesterday()?data.streak:0;
 }
 function listen(text){
   if(!window.speechSynthesis || !window.SpeechSynthesisUtterance){
@@ -170,7 +205,7 @@ function btn(action,label,value="",style="button"){
 function intro(title,subtitle){return '<div class="intro"><h1>'+title+'</h1><p class="muted">'+subtitle+'</p></div>';}
 function today(){
   const lesson = daily();
-  const completed = data.runs.some(run => run.day === day() && run.id === lesson.id);
+  const completed = data.daily.complete;
   const scenes = [
     ["campus","On campus"],
     ["cafe","At the café"],
@@ -217,12 +252,12 @@ function review(){
 }
 function reviewRow(l){return '<li><strong>'+l.title+'</strong>'+btn("review","Recall phrase",l.id,"ghost")+'</li>';}
 function progress(){
-  const scored=data.runs.length, rate=scored?Math.round(100*data.runs.filter(r=>r.correct).length/scored)+"%":"—";
+  const rate=data.total?Math.round(100*data.passed/data.total)+"%":"—";
   const passes=lessons.filter(l=>l.level===level()&&checked(l.id)).length;
   return intro("Progress","Track practice days, checkpoint accuracy, and difficulty.")+
   '<div class="progress-grid"><div class="card"><strong>'+lessons.filter(l=>studied(l.id)).length+' / '+lessons.length+'</strong>Lessons done</div><div class="card"><strong>'+rate+'</strong>Checkpoint accuracy</div><div class="card"><strong>'+streak()+'</strong>Day streak</div></div>'+
   '<section class="section card"><h3>'+bands[level()]+'</h3><p>'+(level()<3?passes+' / 3 distinct lesson checkpoints passed at this level. Pass three to unlock '+bands[level()+1]+'.':'You’ve unlocked all three difficulty levels.')+'</p>'+(level()<3?'<div class="meter" role="progressbar" aria-label="Difficulty unlock" aria-valuenow="'+passes+'" aria-valuemin="0" aria-valuemax="3"><span style="width:'+Math.min(100,passes/3*100)+'%"></span></div>':'')+'</section>'+
-  '<section class="section card"><h3>Recent sessions</h3>'+(scored?'<ul class="rows">'+data.runs.slice().reverse().slice(0,10).map(r=>'<li><div><strong>'+lessons[r.id].title+'</strong><small>'+r.day+' · '+(r.correct?"Checkpoint passed":"Checkpoint missed")+'</small></div><details><summary>My response</summary><div class="answer">'+escaped(r.writing)+'</div></details></li>').join("")+'</ul>':'<p class="muted">Complete a session to see it here.</p>')+'</section><p class="note">'+(storageAvailable?"Progress and responses are saved in this browser.":"Browser storage is unavailable. Progress lasts for this open tab.")+'</p>';
+  '<p class="note">'+(storageAvailable?"This browser keeps progress totals and current review status. Individual sessions, answers, and playback activity aren’t recorded.":"Progress lasts for this open tab.")+'</p>';
 }
 function start(id,reviewOnly){
   const lesson=lessons[id];
@@ -241,7 +276,7 @@ function quiz(lesson,result){
 }
 function practice(){
   const s=session;
-  if(s.done) return '<div class="practice"><div class="eyebrow">Session complete</div><h2>'+s.lesson.title+'</h2><div class="card"><p>'+(s.checkpoint?'Checkpoint passed.':'Checkpoint missed. You can retry the phrase in Review.')+'</p><p>Response saved '+(storageAvailable?'in this browser.':'for this tab.')+'</p><div class="actions">'+btn("go","Back to today →","today")+btn("go","View progress","progress","ghost")+'</div></div></div>';
+  if(s.done) return '<div class="practice"><div class="eyebrow">Session complete</div><h2>'+s.lesson.title+'</h2><div class="card"><p>'+(s.checkpoint?'Checkpoint passed.':'Checkpoint missed. You can retry the phrase in Review.')+'</p><div class="actions">'+btn("go","Back to today →","today")+btn("go","View progress","progress","ghost")+'</div></div></div>';
   const {kind,lesson}=s.steps[s.index];
   const titles={recall:"Quick review",vocab:"Useful vocabulary",dialogue:"Read the dialogue",checkpoint:"Checkpoint",response:"Make it your own"};
   let content="";
@@ -254,8 +289,107 @@ function practice(){
     '<form data-form="response"><label for="answer">Your response in French</label><textarea id="answer" lang="fr" name="answer" required maxlength="1200"></textarea><div class="actions"><button class="button">Submit response</button></div></form>')+'</div>';
   return '<div class="practice"><div class="step-head">'+btn("go",s.reviewOnly?"← Review":"← Today",s.reviewOnly?"review":"today","ghost")+'<span class="pill">'+(s.index+1)+' / '+s.steps.length+'</span></div><div class="meter" role="progressbar" aria-label="Session step" aria-valuenow="'+(s.index+1)+'" aria-valuemin="0" aria-valuemax="'+s.steps.length+'"><span style="width:'+((s.index+1)/s.steps.length*100)+'%"></span></div><h2>'+titles[kind]+'</h2><div class="eyebrow" lang="fr">'+lesson.fr+'</div>'+content+'</div>';
 }
+const grammarChapters = [
+["Foundations","Building a sentence","Start with a subject, a verb, then the rest of the sentence. The subject tells you who does the action. Use tu with a classmate you know and vous with a lecturer or a group. On often means “we” in conversation, but takes the same verb form as il or elle.",
+[["Je cherche la salle 204.","I’m looking for room 204."],["On travaille à la bibliothèque.","We’re working at the library."]],
+[["Replace nous with on and conjugate travailler. « ___ à la bibliothèque. »","On travaille"],["You are asking a lecturer. Choose tu or vous. « ___ parlez anglais ? »","Vous"]]],
+["Foundations","Nouns, articles and agreement","Learn each noun with its article. Use un or une for “a”, des for plural “some”, and le, la or les for “the”. Le and la become l’ before a vowel or silent h. Adjectives usually follow the noun and agree in gender and number.",
+[["une petite salle → des petites salles","a small room → some small rooms"],["le nouveau cours → les nouveaux cours","the new class → the new classes"]],
+[["Add the indefinite article. « ___ salle »","une"],["Make petite plural. « les ___ salles »","petites"]]],
+["Foundations","Être and avoir","Être means “to be” and avoir means “to have”. Learn these present forms separately. French uses avoir for age and expressions like avoir faim and avoir besoin de.",
+[["je suis · tu es · il/elle/on est · nous sommes · vous êtes · ils/elles sont","être, present tense"],["j’ai · tu as · il/elle/on a · nous avons · vous avez · ils/elles ont","avoir, present tense"],["J’ai besoin d’une carte étudiante.","I need a student ID."]],
+[["« Nous ___ en cours. » Use être.","sommes"],["« Elles ___ un examen demain. » Use avoir.","ont"]]],
+["Foundations","Present tense and verb endings","The infinitive is the dictionary form. For regular -er verbs, drop -er and add -e, -es, -e, -ons, -ez, -ent. For regular verbs like finir, drop -ir and add -is, -is, -it, -issons, -issez, -issent. For verbs like attendre, drop -re and add -s, -s, nothing, -ons, -ez, -ent. Learn irregular verbs separately.",
+[["Je parle français en cours.","I speak French in class."],["Nous finissons à midi.","We finish at noon."],["Elle attend le métro.","She is waiting for the métro."]],
+[["« Vous ___ le français. » Use étudier.","étudiez"],["« Ils ___ le devoir. » Use finir.","finissent"],["« Tu ___ le bus. » Use attendre.","attends"]]],
+["Foundations","Negation and questions","For standard written negation, put ne … pas around the conjugated verb. Use n’ before a vowel or silent h. In speech, a statement can become a question with rising intonation. Est-ce que works in both neutral speech and writing.",
+[["Je n’ai pas cours demain.","I don’t have class tomorrow."],["Est-ce que le bureau est ouvert ?","Is the office open?"],["À quelle heure commence le cours ?","What time does the class start?"]],
+[["Make « Je parle vite. » negative.","Je ne parle pas vite"],["Complete « ___ le cours commence à neuf heures ? » with the neutral question phrase.","Est-ce que"]]],
+["Foundations","Prepositions, places and quantities","Use à for cities, en for most feminine countries, and au for masculine countries starting with a consonant. À + le becomes au, and à + les becomes aux. De + le becomes du, and de + les becomes des. Use du, de la or de l’ for an unspecified amount.",
+[["J’étudie à Paris, en France.","I study in Paris, in France."],["Je vais au secrétariat.","I’m going to the office."],["Je voudrais de l’eau.","I’d like some water."]],
+[["« Je vais ___ secrétariat. » Combine à + le.","au"],["« Je voudrais ___ eau. » Use the partitive article.","de l’eau"]]],
+["Foundations","Possessives and demonstratives","Choose mon, ma or mes according to what is owned. Use mon before a feminine noun that starts with a vowel or silent h. To point out a noun, use ce, cet, cette or ces. Cet goes before a masculine singular noun starting with a vowel or silent h.",
+[["mon dossier · ma carte · mes notes","my file · my card · my notes"],["cet examen · cette salle · ces livres","this exam · this room · these books"]],
+[["« ___ carte étudiante » Use “my”.","ma"],["« ___ entretien » Use “this”.","cet"]]],
+["Everyday French","Common irregular verbs","Use aller for going, faire for doing, and prendre for taking. Pouvoir, vouloir and devoir are followed by an infinitive when a second verb expresses what you can, want or must do.",
+[["Nous allons à la bibliothèque.","We’re going to the library."],["Vous faites le compte rendu. Je prends le métro.","You’re writing the report. I’m taking the métro."],["Je peux entrer ? Vous voulez venir ? On doit partir.","Can I come in? Do you want to come? We have to leave."]],
+[["« Nous ___ un exposé. » Use faire.","faisons"],["« Vous ___ rendre ce devoir. » Use devoir.","devez"],["« Je ___ la ligne 6. » Use prendre.","prends"]]],
+["Everyday French","Near future and recent past","Conjugate aller in the present and add the infinitive for something you are going to do. Conjugate venir in the present and use de + infinitive for something you have just done. De becomes d’ before a vowel or silent h.",
+[["Je vais envoyer le document.","I’m going to send the document."],["On vient d’arriver.","We’ve just arrived."]],
+[["« Demain, nous ___ visiter le campus. » Use aller.","allons"],["« Je viens ___ arriver. » Complete the recent past.","d’"]]],
+["Everyday French","Passé composé","Use the present of avoir or être plus the past participle for a completed past event. Many regular participles end in -é, -i or -u. Most verbs use avoir. Common verbs such as arriver and partir, and pronominal verbs, use être. With intransitive arriver and partir, the participle agrees with the subject.",
+[["J’ai rendu mon devoir.","I submitted my assignment."],["Elles sont arrivées en avance.","They arrived early."],["J’ai pris le métro.","I took the métro."]],
+[["« Vous ___ fini le devoir. » Add the auxiliary.","avez"],["« Elles sont ___ à midi. » Use partir.","parties"]]],
+["Everyday French","Imparfait versus passé composé","Use the imparfait for background, ongoing states and repeated past habits. Use the passé composé to tell what happened on a particular occasion. For most imparfait forms, remove -ons from the present nous form and add -ais, -ais, -ait, -ions, -iez, -aient. Être uses ét-.",
+[["Quand j’habitais à Paris, je prenais souvent le métro.","When I lived in Paris, I often took the métro."],["Il pleuvait quand je suis sortie.","It was raining when I went out."]],
+[["« Avant, je ___ souvent à la bibliothèque. » Use travailler in the imparfait.","travaillais"],["« Hier, le cours ___ à neuf heures pile. » Use commencer in the passé composé.","a commencé"]]],
+["Everyday French","Object and reflexive pronouns","Use le, la or les for a direct object and lui or leur for an indirect recipient in patterns like parler à quelqu’un. These pronouns usually go before the conjugated verb. If they belong to an infinitive, put them before that infinitive. Reflexive verbs use me, te, se, nous, vous or se with the matching subject.",
+[["Je lis le mail. → Je le lis.","I’m reading the email. → I’m reading it."],["Je vais parler à la professeure. → Je vais lui parler.","I’m going to talk to the lecturer. → I’m going to talk to her."],["Je me lève à sept heures.","I get up at seven."]],
+[["« Je ___ lis. » Replace les consignes.","les"],["« Je vais ___ parler. » Replace à mes camarades.","leur"]]],
+["Everyday French","Y and en","Y often replaces a place or an à phrase referring to a thing. En often replaces a de phrase or an indefinite quantity. Keep an explicit number or quantity after the verb when using en.",
+[["Tu vas à la bibliothèque ? Oui, j’y vais.","Are you going to the library? Yes, I am."],["Tu as deux stylos ? Oui, j’en ai deux.","Do you have two pens? Yes, I have two."]],
+[["« Vous allez à Paris ? Oui, nous ___ allons. »","y"],["« Tu veux du café ? Oui, j’___ veux. »","en"]]],
+["Everyday French","Imperatives and comparisons","For a command, use the tu, nous or vous verb form without the subject. Most regular -er verbs drop the final s in the tu imperative. For comparison, use plus, aussi or moins + adjective + que. Use meilleur for “better” when describing a noun and mieux when describing how something is done.",
+[["Prenez le métro jusqu’à Odéon.","Take the métro to Odéon."],["Cette salle est plus calme que l’autre.","This room is quieter than the other one."]],
+[["Give a vous command using prendre. « ___ la ligne 6. »","Prenez"],["Add “as quiet as”. « Cette salle est ___ l’autre. »","aussi calme que"]],
+],
+["University French","Future simple","Use the future simple for predictions and future events. Add -ai, -as, -a, -ons, -ez, -ont to the future stem. For many verbs it is the infinitive, with the final e removed from -re verbs. Common irregular stems include ser-, aur-, ir- and fer-.",
+[["Je rendrai le rapport jeudi.","I’ll submit the report on Thursday."],["Nous irons au séminaire lundi.","We’ll go to the seminar on Monday."]],
+[["« Vous ___ un créneau demain ? » Use avoir in the future.","aurez"],["« Nous ___ le rapport mardi. » Use rendre in the future.","rendrons"]]],
+["University French","Conditional and polite requests","Use the future stem with the imparfait endings for the present conditional. It is useful for requests and for hypothetical results. Je voudrais is a polite way to ask for something.",
+[["Pourriez-vous confirmer la date limite ?","Could you confirm the deadline?"],["Avec plus de temps, je relirais le rapport.","With more time, I would reread the report."]],
+[["« Je ___ un délai supplémentaire. » Use vouloir in the conditional.","voudrais"],["« Vous ___ relire mon rapport ? » Use pouvoir in the conditional.","pourriez"]]],
+["University French","Relative clauses","Use qui when the relative word is the subject of the following verb. Use que when another subject follows and the relative word is its direct object. Où refers to a place or time. Dont replaces de plus its antecedent.",
+[["Le cours qui commence à neuf heures.","The class that starts at nine."],["Le livre que je lis.","The book that I’m reading."],["Le sujet dont on parle.","The subject we’re talking about."]],
+[["« La salle ___ nous travaillons. »","où"],["« Le document ___ vous cherchez. »","que"],["« Le projet ___ nous parlons. » Hint: parler de.","dont"]]],
+["University French","Pluperfect and si clauses","Use the imparfait of avoir or être plus the participle for an event that had already happened. For a real possibility, use si + present, then a present, future, or command as appropriate. For a hypothetical present situation, use si + imparfait, then the conditional.",
+[["J’avais déjà envoyé le dossier quand le bureau m’a appelée.","I had already sent the file when the office called me."],["Si j’ai le temps, je passerai au bureau.","If I have time, I’ll stop by the office."],["Si j’avais le temps, je passerais au bureau.","If I had time, I would stop by the office."]],
+[["« Nous ___ déjà fini quand elle est arrivée. » Add the pluperfect auxiliary.","avions"],["« Si j’avais plus de temps, je ___ davantage. » Use étudier.","étudierais"]]],
+["University French","Present subjunctive","After expressions of necessity, wishes or doubt such as il faut que, je veux que and je doute que, use the subjunctive. Many verbs use the present ils stem for je, tu, il and ils forms. Nous and vous often use the present nous stem. Learn irregular forms such as soit, ait, fasse and aille.",
+[["Il faut que vous rendiez le rapport vendredi.","You need to submit the report on Friday."],["Je voudrais que le dossier soit complet.","I’d like the file to be complete."]],
+[["« Il faut que tu ___ le formulaire. » Use finir.","finisses"],["« Il faut qu’elle ___ au secrétariat. » Use aller.","aille"]]]
+];
+const grammarForm = (chapter, selected) => chapter[4].map(([prompt, answer], index) => {
+  const result = selected?.[index];
+  return `<div class="grammar-question">
+    <label for="grammar-${index}">${prompt}</label>
+    <input id="grammar-${index}" name="answer" lang="fr" autocomplete="off" spellcheck="false" maxlength="180" required value="${escaped(result?.value ?? "")}">
+    ${result ? `<p class="grammar-result">${result.correct ? "Correct" : `Expected <strong lang="fr">${answer}</strong>`}</p>` : ""}
+  </div>`;
+}).join("");
+let grammarIndex = null;
+let grammarResults = null;
+function grammar(){
+  if(grammarIndex===null){
+    const groups=["Foundations","Everyday French","University French"];
+    return intro("Grammar","French rules explained in English, with examples from student life in Paris.")+
+    groups.map(group=>`<section class="section card"><h3>${group}</h3><ul class="rows">${grammarChapters.map(([category,title],i)=>category===group?`<li><strong>${title}</strong>${btn("grammar","Study →",i,"ghost")}</li>`:"").join("")}</ul></section>`).join("")+
+    '<p class="note">References <a href="https://laits.utexas.edu/fi/" target="_blank" rel="noopener noreferrer">Français interactif</a> and <a href="https://laits.utexas.edu/tex/gr/" target="_blank" rel="noopener noreferrer">Tex’s French Grammar, University of Texas at Austin</a>. Examples and exercises were written for FrenchFeral.</p>';
+  }
+  const [group,title,rule,examples]=grammarChapters[grammarIndex];
+  return `<article class="practice grammar-chapter">
+    ${btn("go","← All grammar","grammar","ghost")}
+    <div class="eyebrow">${group}</div><h2>${title}</h2>
+    <section class="card"><h3>The rule</h3><p>${rule}</p><ul class="vocab">${examples.map(([fr,en])=>`<li><div><strong lang="fr">${fr}</strong><small>${en}</small></div></li>`).join("")}</ul></section>
+    <section class="card"><h3>Try it</h3><p class="muted">Fill in the missing words. Accents, spelling, and agreement count.</p>
+      <form data-form="grammar">${grammarForm(grammarChapters[grammarIndex],grammarResults)}
+      <button class="button">Check grammar</button></form>
+    </section>
+    <div class="actions">${grammarIndex>0?btn("grammar","← Previous topic",grammarIndex-1,"ghost"):""}${grammarIndex+1<grammarChapters.length?btn("grammar","Next topic →",grammarIndex+1):""}</div>
+  </article>`;
+}
+function checkGrammar(form){
+  const tidy = value => value.normalize("NFC").toLowerCase().replace(/[’‘]/g,"'").replace(/[.!?]+$/,"").replace(/\s+/g," ").trim();
+  grammarResults=Array.from(new FormData(form).getAll("answer"),(value,i)=>({
+    value, correct:Boolean(value.trim()) && tidy(value.trim())===tidy(grammarChapters[grammarIndex][4][i][1])
+  }));
+  form.innerHTML=grammarForm(grammarChapters[grammarIndex],grammarResults)+'<button class="button">Check grammar</button>';
+  notice.textContent=grammarResults.filter(result=>result.correct).length+" of "+grammarResults.length+" correct";
+  form.querySelector("button").focus({preventScroll:true});
+}
+
 function render(focus=false){
-  const views={today,lessons:library,review,progress,practice};
+  const views={today,lessons:library,grammar,review,progress,practice};
   app.classList.toggle("home",page==="today");
   app.innerHTML=views[page]();
   document.querySelectorAll("header button[data-page]").forEach(button=>{
@@ -264,7 +398,7 @@ function render(focus=false){
   });
   if(focus){app.focus({preventScroll:true});window.scrollTo(0,0);}
 }
-function go(destination){session=null;page=destination;render(true);}
+function go(destination){session=null;grammarIndex=null;grammarResults=null;page=destination;render(true);}
 document.addEventListener("click",event=>{
   const button=event.target.closest("button");
   if(!button)return;
@@ -272,16 +406,18 @@ document.addEventListener("click",event=>{
   if(destination)go(destination);
   if(phrase)listen(phrase);
   if(action==="go")go(value);
+  if(action==="grammar"){grammarIndex=Number(value);grammarResults=null;render(true);}
   if(action==="daily")start(daily().id,false);
   if(action==="start"||action==="review")start(Number(value),action==="review");
   if(action!=="next"||!session)return;
   if(session.reviewOnly){go("review");return;}
-  if(session.index===session.steps.length-1){session.done=true;}
+  if(session.index===session.steps.length-1){session.done=true;session.result=null;}
   else{session.index++;session.result=null;}
   render(true);
 });
 app.addEventListener("submit",event=>{
   event.preventDefault();
+  if(event.target.dataset.form==="grammar"){checkGrammar(event.target);return;}
   if(!session||session.result)return;
   const input=event.target.elements.answer;
   const answer=input.value.trim();
@@ -289,8 +425,7 @@ app.addEventListener("submit",event=>{
   const {kind,lesson}=session.steps[session.index];
   if(kind==="response"){
     session.result={answer};
-    data.runs.push({id:lesson.id,day:day(),correct:session.checkpoint,writing:answer});
-    persist();
+    completeLesson(lesson.id,session.checkpoint);
   }else{
     const passed=correct(answer,lesson);
     session.result={answer,passed};

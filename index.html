@@ -47,6 +47,14 @@ main:not(.home) .intro h1{font-size:clamp(3.4rem,7vw,6rem)}
 @media(max-width:650px){.shell{width:calc(100% - 32px)}.top{display:flex;flex-direction:column;gap:10px;align-items:start;min-height:0}.cover{display:block;min-height:0;padding-bottom:190px;overflow:hidden}.cover .shell{padding-top:39px}.cover-copy{max-width:100%}.cover h1{font-size:clamp(3.6rem,15vw,6rem);margin:14px 0 16px}.cover h1 br{display:none}.cover-art{top:auto;height:285px;object-position:87% 75%;mask-image:linear-gradient(transparent,#000 35%,#000 93%,transparent)}.cover:after{background:none}.studies{padding-top:13px}.studies-head{align-items:start;gap:9px;flex-direction:column}.studies-head .ghost{padding-left:0}.scenes{grid-template-columns:repeat(2,minmax(0,1fr));row-gap:22px}.scene-name{font-size:1.65rem}.scene-arrow{margin-top:8px}.field-notes{gap:8px;font-size:.8rem}.field-notes .eyebrow{letter-spacing:.06em}}
 
 .grammar-chapter>.eyebrow{margin-top:16px}.grammar-question{margin:16px 0}.grammar-question input{width:100%;padding:10px 12px;border:1px solid #9fa89c;border-radius:4px;background:var(--white);color:var(--ink)}.grammar-question input:focus-visible{outline:3px solid var(--orange);outline-offset:3px}.grammar-result{margin:6px 0;color:var(--green)}.note a{color:var(--green)}
+
+.audio-controls{display:flex;flex-wrap:wrap;gap:5px;justify-content:flex-start}
+.audio-controls .listen:disabled{opacity:.48;cursor:default}
+.voice-picker{display:flex;align-items:center;gap:8px 12px;flex-wrap:wrap;margin-bottom:14px}
+.voice-picker label{font-weight:700;color:var(--green)}
+.voice-picker select{max-width:100%;font:inherit;color:var(--green);background:var(--white);border:1px solid var(--line);border-radius:5px;padding:5px}
+.voice-picker select:focus-visible{outline:3px solid var(--orange);outline-offset:3px}
+@media(max-width:600px){.vocab li:has(.audio-controls){align-items:flex-start;flex-direction:column;gap:6px}}
 </style></head><body>
 <header><div class="shell top"><div class="brand"><span class="brand-mark" aria-hidden="true">✦</span>FrenchFeral</div><nav aria-label="Main navigation"><button data-page="today">Today</button><button data-page="lessons">Lessons</button><button data-page="grammar">Grammar</button><button data-page="review">Review</button><button data-page="progress">Progress</button></nav><button class="button header-cta" data-action="daily">Start practice <span aria-hidden="true">→</span></button></div></header>
 <main id="app" class="shell" tabindex="-1"></main><div id="notice" class="sr" role="status"></div>
@@ -188,17 +196,88 @@ function yesterday(){
 function streak(){
   return data.lastDay===day()||data.lastDay===yesterday()?data.streak:0;
 }
-function listen(text){
-  if(!window.speechSynthesis || !window.SpeechSynthesisUtterance){
-    notice.textContent="Read the French text aloud. Audio playback is unavailable.";
+const speech = window.speechSynthesis;
+const preferredVoice = /\b(am[eé]lie|audrey|aur[eé]lie|marie|julie|hortense|denise|vivienne|eloise|louise|celine|c[eé]line|sylvie|virginie|chlo[eé]|helene|h[eé]l[eè]ne|pauline|leonie|l[eé]onie|alice|amelie)\b/i;
+let voiceURI = "";
+let playback = null;
+function frenchVoices(){
+  return (speech?.getVoices() ?? []).filter(voice=>/^fr(?:[-_]|$)/i.test(voice.lang)).sort((a,b)=>
+    Number(preferredVoice.test(b.name))-Number(preferredVoice.test(a.name)) ||
+    Number(/^fr[-_]FR$/i.test(b.lang))-Number(/^fr[-_]FR$/i.test(a.lang)) ||
+    Number(b.localService)-Number(a.localService) || a.name.localeCompare(b.name));
+}
+function refreshVoices(){
+  const select=app.querySelector("#french-voice");
+  const voices=frenchVoices();
+  const chosen=voices.find(voice=>voice.voiceURI===voiceURI) ?? voices[0];
+  if(select){
+    select.replaceChildren(...voices.map(voice=>new Option(voice.name+" ("+voice.lang+")",voice.voiceURI)));
+    if(chosen)select.value=chosen.voiceURI;
+    else select.add(new Option(speech?"Device default (French)":"Audio unavailable",""));
+    select.disabled=!voices.length;
+  }
+  return chosen;
+}
+function syncPlayback(){
+  app.querySelectorAll("[data-audio=pause]").forEach(button=>{
+    const active=playback?.player===button.closest(".audio-controls");
+    button.disabled=!active;
+    button.textContent=active && playback.paused?"Resume":"Pause";
+  });
+}
+function stopPlayback(){
+  if(!playback)return;
+  playback=null;
+  speech.cancel();
+  if(speech.paused)speech.resume();
+  syncPlayback();
+}
+function playAudio(player){
+  if(!speech || !window.SpeechSynthesisUtterance){
+    notice.textContent="Audio playback is unavailable in this browser.";
     return;
   }
-  const utterance=new SpeechSynthesisUtterance(text);
-  utterance.lang="fr-FR";utterance.rate=.86;
-  window.speechSynthesis.cancel();
-  window.speechSynthesis.speak(utterance);
+  stopPlayback();
+  const voice=refreshVoices();
+  const utterance=new SpeechSynthesisUtterance(player.dataset.phrase);
+  utterance.lang=voice?.lang || "fr-FR";
+  if(voice)utterance.voice=voice;
+  utterance.rate=.86;
+  playback={player,utterance,paused:false};
+  const finish=()=>{
+    if(playback?.utterance!==utterance)return false;
+    playback=null;
+    syncPlayback();
+    return true;
+  };
+  utterance.onend=finish;
+  utterance.onerror=()=>{if(finish())notice.textContent="Could not play the French voice. Try another voice if one is available.";};
+  syncPlayback();
+  speech.speak(utterance);
 }
-const listenButton = text => '<button class="listen" type="button" data-listen="'+escaped(text)+'" aria-label="Listen in French">♪ Listen</button>';
+function togglePause(player){
+  if(playback?.player!==player)return;
+  if(playback.paused)speech.resume();
+  else speech.pause();
+  playback.paused=!playback.paused;
+  syncPlayback();
+}
+speech?.addEventListener("voiceschanged",refreshVoices);
+app.addEventListener("change",event=>{
+  if(event.target.id!=="french-voice")return;
+  voiceURI=event.target.value;
+  stopPlayback();
+});
+const voicePicker = () => `<div class="voice-picker">
+  <label for="french-voice">French voice</label>
+  <select id="french-voice" aria-describedby="voice-note"></select>
+  <small id="voice-note" class="muted">Voices available on this device.</small>
+</div>`;
+const listenButton = text => `<div class="audio-controls" role="group" aria-label="French audio controls" data-phrase="${escaped(text)}">
+  <button class="listen" type="button" data-audio="play">♪ Listen</button>
+  <button class="listen" type="button" data-audio="pause" disabled>Pause</button>
+  <button class="listen" type="button" data-audio="repeat" title="Replay from the beginning">Repeat</button>
+</div>`;
 function btn(action,label,value="",style="button"){
   return '<button type="button" class="'+style+'" data-action="'+action+'" data-value="'+value+'">'+label+'</button>';
 }
@@ -281,11 +360,11 @@ function practice(){
   const titles={recall:"Quick review",vocab:"Useful vocabulary",dialogue:"Read the dialogue",checkpoint:"Checkpoint",response:"Make it your own"};
   let content="";
   if(kind==="recall"||kind==="checkpoint") content=quiz(lesson,s.result);
-  if(kind==="vocab") content='<div class="card"><ul class="vocab">'+lesson.vocab.map(([fr,en])=>'<li><div><strong lang="fr">'+fr+'</strong><small>'+en+'</small></div>'+listenButton(fr)+'</li>').join("")+'</ul><div class="actions">'+btn("next","Read the dialogue →")+'</div></div>';
-  if(kind==="dialogue") content='<div class="card">'+listenButton(lesson.dialogue.map(line=>line[1]).join(" "))+
+  if(kind==="vocab") content='<div class="card">'+voicePicker()+'<ul class="vocab">'+lesson.vocab.map(([fr,en])=>'<li><div><strong lang="fr">'+fr+'</strong><small>'+en+'</small></div>'+listenButton(fr)+'</li>').join("")+'</ul><div class="actions">'+btn("next","Read the dialogue →")+'</div></div>';
+  if(kind==="dialogue") content='<div class="card">'+voicePicker()+listenButton(lesson.dialogue.map(line=>line[1]).join(" "))+
     lesson.dialogue.map(([who,fr,en])=>'<div class="dialogue"><strong>'+who+'</strong><p lang="fr">'+fr+'</p><details><summary>English</summary><small>'+en+'</small></details></div>').join("")+'<div class="actions">'+btn("next","Try the checkpoint →")+'</div></div>';
   if(kind==="response") content='<div class="card"><p>'+lesson.task+'</p><p class="muted">Write your response, or say it aloud and type what you said.</p>'+(s.result?
-    '<div class="feedback"><strong>Your response</strong><div class="answer" lang="fr">'+escaped(s.result.answer)+'</div><p><strong>Model response</strong><br><span lang="fr">'+lesson.model+'</span></p>'+listenButton(lesson.model)+'<p><strong>Self-check</strong><br>'+lesson.check+'</p></div><div class="actions">'+btn("next","Finish session →")+'</div>':
+    '<div class="feedback"><strong>Your response</strong><div class="answer" lang="fr">'+escaped(s.result.answer)+'</div><p><strong>Model response</strong><br><span lang="fr">'+lesson.model+'</span></p>'+voicePicker()+listenButton(lesson.model)+'<p><strong>Self-check</strong><br>'+lesson.check+'</p></div><div class="actions">'+btn("next","Finish session →")+'</div>':
     '<form data-form="response"><label for="answer">Your response in French</label><textarea id="answer" lang="fr" name="answer" required maxlength="1200"></textarea><div class="actions"><button class="button">Submit response</button></div></form>')+'</div>';
   return '<div class="practice"><div class="step-head">'+btn("go",s.reviewOnly?"← Review":"← Today",s.reviewOnly?"review":"today","ghost")+'<span class="pill">'+(s.index+1)+' / '+s.steps.length+'</span></div><div class="meter" role="progressbar" aria-label="Session step" aria-valuenow="'+(s.index+1)+'" aria-valuemin="0" aria-valuemax="'+s.steps.length+'"><span style="width:'+((s.index+1)/s.steps.length*100)+'%"></span></div><h2>'+titles[kind]+'</h2><div class="eyebrow" lang="fr">'+lesson.fr+'</div>'+content+'</div>';
 }
@@ -389,9 +468,11 @@ function checkGrammar(form){
 }
 
 function render(focus=false){
+  stopPlayback();
   const views={today,lessons:library,grammar,review,progress,practice};
   app.classList.toggle("home",page==="today");
   app.innerHTML=views[page]();
+  if(app.querySelector("#french-voice"))refreshVoices();
   document.querySelectorAll("header button[data-page]").forEach(button=>{
     if(button.dataset.page===page)button.setAttribute("aria-current","page");
     else button.removeAttribute("aria-current");
@@ -402,9 +483,14 @@ function go(destination){session=null;grammarIndex=null;grammarResults=null;page
 document.addEventListener("click",event=>{
   const button=event.target.closest("button");
   if(!button)return;
-  const {page:destination,action,value,listen:phrase}=button.dataset;
+  const {page:destination,action,value,audio}=button.dataset;
   if(destination)go(destination);
-  if(phrase)listen(phrase);
+  if(audio){
+    const player=button.closest(".audio-controls");
+    if(audio==="pause")togglePause(player);
+    else playAudio(player);
+    return;
+  }
   if(action==="go")go(value);
   if(action==="grammar"){grammarIndex=Number(value);grammarResults=null;render(true);}
   if(action==="daily")start(daily().id,false);

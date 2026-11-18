@@ -55,9 +55,15 @@ main:not(.home) .intro h1{font-size:clamp(3.4rem,7vw,6rem)}
 .voice-picker select{max-width:100%;font:inherit;color:var(--green);background:var(--white);border:1px solid var(--line);border-radius:5px;padding:5px}
 .voice-picker select:focus-visible{outline:3px solid var(--orange);outline-offset:3px}
 @media(max-width:600px){.vocab li:has(.audio-controls){align-items:flex-start;flex-direction:column;gap:6px}}
+
+.account-input, form[data-form="account"] input{display:block;width:100%;padding:10px 12px;border:1px solid var(--line);background:var(--white);color:var(--green);border-radius:4px}
+.dashboard-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}
 </style></head><body>
-<header><div class="shell top"><div class="brand"><span class="brand-mark" aria-hidden="true">✦</span>FrenchFeral</div><nav aria-label="Main navigation"><button data-page="today">Today</button><button data-page="lessons">Lessons</button><button data-page="grammar">Grammar</button><button data-page="review">Review</button><button data-page="progress">Progress</button></nav><button class="button header-cta" data-action="daily">Start practice <span aria-hidden="true">→</span></button></div></header>
+<header><div class="shell top"><div class="brand"><span class="brand-mark" aria-hidden="true">✦</span>FrenchFeral</div><nav aria-label="Main navigation"><button data-page="today">Today</button><button data-page="lessons">Lessons</button><button data-page="grammar">Grammar</button><button data-page="review">Review</button><button data-page="progress">Dashboard</button><button data-page="account">Account</button></nav><button class="button header-cta" data-action="daily">Start practice <span aria-hidden="true">→</span></button></div></header>
 <main id="app" class="shell" tabindex="-1"></main><div id="notice" class="sr" role="status"></div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/dist/umd/supabase.js"></script>
+<script src="account-config.js"></script>
+<script src="account.js"></script>
 <script>
 const lessons = [
 [1,"Finding your classroom","Au premier cours","Find the right room and check when your lecture starts.",
@@ -141,8 +147,16 @@ try {
 const app = document.querySelector("#app");
 const notice = document.querySelector("#notice");
 let page = "today", session = null;
+let guestProgress = cleanProgress(data);
+data = guestProgress;
+function setPracticeData(next){data=next;}
 function persist(){
-  try { localStorage.setItem(key,JSON.stringify(data)); }
+  if(accountUser){queueProgress();return;}
+  guestProgress=data;
+  saveGuestProgress();
+}
+function saveGuestProgress(){
+  try { localStorage.setItem(key,JSON.stringify(guestProgress)); }
   catch { storageAvailable = false; notice.textContent = "Progress could not be saved on this browser."; }
 }
 function day(date = new Date()){
@@ -181,7 +195,7 @@ function daily(){
   const pool = lessons.filter(l=>l.level===level());
   const next = pool.find(l=>!studied(l.id))||pool.find(l=>!checked(l.id))||pool[Math.floor(Date.now()/86400000)%pool.length];
   data.daily={day:day(),id:next.id,complete:false};
-  persist();
+  if(!accountUser)persist();
   return next;
 }
 function record(id,passed){
@@ -333,14 +347,23 @@ function reviewRow(l){return '<li><strong>'+l.title+'</strong>'+btn("review","Re
 function progress(){
   const rate=data.total?Math.round(100*data.passed/data.total)+"%":"—";
   const passes=lessons.filter(l=>l.level===level()&&checked(l.id)).length;
-  return intro("Progress","Track practice days, checkpoint accuracy, and difficulty.")+
+  if(accountClient&&!accountReady)return intro("Dashboard","Loading saved practice…")+btn("go","Account","account");
+  const next = daily();
+  const weak = misses();
+  const grammarPick = [3,9,15][level()-1];
+  return intro("Dashboard",accountUser?"Your synced French practice.":"Guest practice is saved on this browser.")+
+  '<section class="card"><div class="eyebrow">Today’s practice</div><h3>'+next.title+'</h3><p>'+next.description+'</p><div class="dashboard-actions">'+btn("start",data.daily.complete?"Practice again":"Start lesson",next.id)+btn("go",accountUser?"Manage account":"Sign in or create an account","account","ghost")+'</div></section>'+
+  '<div class="section">'+
   '<div class="progress-grid"><div class="card"><strong>'+lessons.filter(l=>studied(l.id)).length+' / '+lessons.length+'</strong>Lessons done</div><div class="card"><strong>'+rate+'</strong>Checkpoint accuracy</div><div class="card"><strong>'+streak()+'</strong>Day streak</div></div>'+
   '<section class="section card"><h3>'+bands[level()]+'</h3><p>'+(level()<3?passes+' / 3 distinct lesson checkpoints passed at this level. Pass three to unlock '+bands[level()+1]+'.':'You’ve unlocked all three difficulty levels.')+'</p>'+(level()<3?'<div class="meter" role="progressbar" aria-label="Difficulty unlock" aria-valuenow="'+passes+'" aria-valuemin="0" aria-valuemax="3"><span style="width:'+Math.min(100,passes/3*100)+'%"></span></div>':'')+'</section>'+
-  '<p class="note">'+(storageAvailable?"This browser keeps progress totals and current review status. Individual sessions, answers, and playback activity aren’t recorded.":"Progress lasts for this open tab.")+'</p>';
+  '</div><section class="section card"><h3>Weak areas</h3>'+(weak.length?'<ul class="rows">'+weak.map(reviewRow).join("")+'</ul>':'<p>No phrases need review yet.</p>')+'</section>'+
+  '<section class="section card"><h3>Suggested grammar</h3><p>'+grammarChapters[grammarPick][1]+'</p>'+btn("grammar","Study topic →",grammarPick,"ghost")+'</section>'+
+  (accountMessage?'<p class="feedback" role="status">'+escaped(accountMessage)+'</p>':'')+
+  '<p class="note">Progress uses totals and current review status. Exercises and listening do not create activity history.</p>';
 }
 function start(id,reviewOnly){
   const lesson=lessons[id];
-  if(!lesson || lesson.level>level()) return;
+  if(!accountReady || accountBusy || !lesson || lesson.level>level()) return;
   const steps=reviewOnly?[{kind:"recall",lesson}]:[
     ...reviewItems(id).map(item=>({kind:"recall",lesson:item})),
     {kind:"vocab",lesson},{kind:"dialogue",lesson},{kind:"checkpoint",lesson},{kind:"response",lesson}
@@ -469,7 +492,7 @@ function checkGrammar(form){
 
 function render(focus=false){
   stopPlayback();
-  const views={today,lessons:library,grammar,review,progress,practice};
+  const views={today,lessons:library,grammar,review,progress,practice,account:accountPanel};
   app.classList.toggle("home",page==="today");
   app.innerHTML=views[page]();
   if(app.querySelector("#french-voice"))refreshVoices();
@@ -492,7 +515,8 @@ document.addEventListener("click",event=>{
     return;
   }
   if(action==="go")go(value);
-  if(action==="grammar"){grammarIndex=Number(value);grammarResults=null;render(true);}
+  if(button.dataset.account){void accountAction(button.dataset.account);return;}
+  if(action==="grammar"){page="grammar";grammarIndex=Number(value);grammarResults=null;render(true);}
   if(action==="daily")start(daily().id,false);
   if(action==="start"||action==="review")start(Number(value),action==="review");
   if(action!=="next"||!session)return;
@@ -503,6 +527,7 @@ document.addEventListener("click",event=>{
 });
 app.addEventListener("submit",event=>{
   event.preventDefault();
+  if(event.target.dataset.form==="account"){void submitAccount(event.target);return;}
   if(event.target.dataset.form==="grammar"){checkGrammar(event.target);return;}
   if(!session||session.result)return;
   const input=event.target.elements.answer;
@@ -521,4 +546,5 @@ app.addEventListener("submit",event=>{
   render(true);
 });
 render();
+initializeAccount();
 </script></body></html>

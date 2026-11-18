@@ -1,19 +1,11 @@
-const accountConfig = window.FRENCHFERAL_CONFIG || {};
-const accountClient = accountConfig.url && accountConfig.publishableKey && window.supabase
-  ? window.supabase.createClient(accountConfig.url, accountConfig.publishableKey, {
-      auth: { storageKey:"frenchferal.auth", flowType:"pkce" }
-    })
-  : null;
-
 let accountUser = null;
 let remoteProgress = null;
-let accountReady = !accountClient;
+const hostedAccounts = location.protocol==="https:";
+let accountReady = !hostedAccounts;
 let accountMessage = "";
 let syncJob = null;
 let accountEpoch = 0;
-let accountMode = "signin";
 let accountBusy = false;
-let reauthDelete = false;
 
 function cleanProgress(raw){
   const result = blank();
@@ -67,26 +59,22 @@ function mergeProgress(remote, before, after, importing=false){
   return cleanProgress(merged);
 }
 
-const columns = "revision,generation,progress,imported_guest";
-async function checkedResult(query){
-  const result = await query;
-  if(result.error) throw result.error;
-  return result.data;
+async function accountRequest(path, options){
+  const response=await fetch(path,{...options,cache:"no-store",credentials:"same-origin"});
+  if(response.status===409)return null;
+  if(response.ok)return response.json();
+  const body=await response.json().catch(()=>null);
+  throw Error(body?.error || "Could not connect to your dashboard. Please try again.");
 }
-function progressRow(user){
-  return accountClient.from("learner_progress").select(columns).eq("user_id",user.id).maybeSingle();
+function progressRow(){
+  return accountRequest("/api/progress");
 }
-async function loadProgress(user){
-  const found = await checkedResult(progressRow(user));
-  if(found)return found;
-  return await checkedResult(accountClient.from("learner_progress").upsert({
-    user_id:user.id,progress:blank()
-  },{onConflict:"user_id",ignoreDuplicates:true}).select(columns).maybeSingle())
-    || await checkedResult(progressRow(user));
-}
-function updateProgress(user, row, changes){
-  return checkedResult(accountClient.from("learner_progress").update({...changes,revision:row.revision+1})
-    .eq("user_id",user.id).eq("revision",row.revision).eq("generation",row.generation).select(columns).maybeSingle());
+function updateProgress(user,row,changes,method="PUT"){
+  return accountRequest("/api/progress",{
+    method,
+    headers:{"Content-Type":"application/json","X-Learner":user.id},
+    body:JSON.stringify({revision:row.revision,generation:row.generation,...changes})
+  });
 }
 function accountViewChanged(){
   if(page==="account" || page==="progress")render();
@@ -100,7 +88,7 @@ async function useAccount(user){
   setPracticeData(user ? blank() : guestProgress);
   if(!user){accountReady=true;accountViewChanged();return;}
   try{
-    const row = await loadProgress(user);
+    const row = await progressRow();
     if(epoch!==accountEpoch)return;
     remoteProgress = row;
     setPracticeData(cleanProgress(row.progress));
@@ -127,9 +115,9 @@ function queueProgress(){
       if(epoch!==accountEpoch)return;
       const snapshot=cleanProgress(data);
       if(JSON.stringify(snapshot)===JSON.stringify(base))return;
-      const current=await checkedResult(progressRow(user));
+      const current=await progressRow();
       if(epoch!==accountEpoch)return;
-      if(!current || current.generation!==remoteProgress.generation){
+      if(!current || (remoteProgress.revision && current.generation!==remoteProgress.generation)){
         if(current){remoteProgress=current;setPracticeData(cleanProgress(current.progress));}
         throw Error("Progress was reset elsewhere. Your dashboard has been refreshed.");
       }
@@ -155,81 +143,28 @@ function queueProgress(){
 function accountPanel(){
   const status=accountMessage ? '<p role="status" class="feedback">'+escaped(accountMessage)+'</p>' : "";
   const button=(action,label)=>'<button class="button" type="button" data-account="'+action+'"'+(accountBusy?' disabled':'')+'>'+label+'</button>';
-  if(!accountClient)return intro("Account","Guest practice works on this device. Account sync needs to be configured for this deployment.");
-  if(!accountReady && accountUser)return intro("Account","Loading your dashboard…")+status+button("retry","Retry connection");
-  if(accountUser && accountMode!=="recovery" && !reauthDelete){
-    return intro("Account",escaped(accountUser.email || "FrenchFeral learner"))+status+
-      '<div class="card"><h3>Progress & privacy</h3><p>Syncs progress totals, streak, and current mastery and review status across devices.</p><div class="actions">'+
-      (guestProgress.total && !remoteProgress?.imported_guest ? button("import","Import practice from this browser"):"")+
-      button("retry","Retry sync")+button("signout","Sign out")+button("reset","Reset progress")+button("delete","Delete account")+'</div></div>';
-  }
-  const recovery=accountMode==="recovery";
-  const signup=accountMode==="signup";
-  const forgot=accountMode==="forgot";
-  const title=reauthDelete?"Confirm account deletion":recovery?"Change password":forgot?"Reset password":signup?"Create account":"Sign in";
-  return intro(title,"Practice in French and carry your progress across devices.")+status+
-    '<section class="card practice"><form data-form="account">'+
-    (recovery||reauthDelete?'':'<label for="email">Email</label><input id="email" name="email" type="email" autocomplete="email" required>')+
-    (forgot?'':'<label for="password">'+(recovery?'New password':'Password')+'</label><input id="password" name="password" type="password" minlength="'+(signup||recovery?8:1)+'" autocomplete="'+(signup||recovery?'new-password':'current-password')+'" required>')+
-    '<div class="actions"><button class="button"'+(accountBusy?' disabled':'')+'>'+ (forgot?'Send reset link':title)+'</button></div></form>'+
-    '<div class="actions">'+(reauthDelete?button("cancel-delete","Cancel"):recovery?'':button(signup||forgot?'signin':'signup',signup||forgot?'Back to sign in':'Create account')+(forgot?'':button("forgot","Forgot password?")))+'</div></section>';
-}
-
-async function submitAccount(form){
-  if(accountBusy || !accountClient)return;
-  const input = new FormData(form);
-  const email = input.get("email");
-  const password = input.get("password");
-  const redirect = new URL(location.pathname,location.origin).href;
-  accountBusy=true;
-  try{
-    if(reauthDelete && accountUser){
-      await checkedResult(accountClient.auth.signInWithPassword({email:accountUser.email,password}));
-      await checkedResult(accountClient.rpc("delete_learner_account"));
-      reauthDelete=false;
-      await accountClient.auth.signOut({scope:"local"});
-      await useAccount(null);
-      accountMessage="Account and synced progress deleted.";
-    }else if(accountMode==="recovery"){
-      await checkedResult(accountClient.auth.updateUser({password}));
-      accountMode="signin";
-      accountMessage="Password updated.";
-    }else if(accountMode==="forgot"){
-      await checkedResult(accountClient.auth.resetPasswordForEmail(email,{redirectTo:redirect}));
-      accountMessage="If an account exists, check your email for a reset link.";
-    }else if(accountMode==="signup"){
-      const result=await checkedResult(accountClient.auth.signUp({email,password,options:{emailRedirectTo:redirect}}));
-      if(result.session)await useAccount(result.user);
-      else accountMessage="Check your email to confirm your account, then sign in.";
-    }else{
-      const result=await checkedResult(accountClient.auth.signInWithPassword({email,password}));
-      await useAccount(result.user);
-    }
-  }catch(error){
-    accountMessage=error.message || "Account request failed. Please try again.";
-  }finally{
-    accountBusy=false;
-    accountViewChanged();
-  }
+  if(!hostedAccounts)return intro("Account","Guest practice is available here. Visit the hosted FrenchFeral Site to sign in.");
+  if(!accountReady)return intro("Account","Checking your connection…")+status+button("retry","Retry connection");
+  if(!accountUser)return intro("Account","Keep practicing as a guest, or sign in to sync your dashboard across devices.")+status+
+    '<a class="button" href="/signin-with-chatgpt?return_to=%2F%3Fview%3Daccount" target="_top">Continue with ChatGPT</a>';
+  return intro("Account","You’re signed in with ChatGPT.")+status+
+    '<div class="card"><h3>Progress & privacy</h3><p>FrenchFeral syncs progress totals, streak, and current mastery and review status.</p><div class="actions">'+
+    (guestProgress.total && !remoteProgress?.imported_guest ? button("import","Import practice from this browser"):"")+
+    button("retry","Retry sync")+button("signout","Sign out")+button("reset","Reset progress")+button("delete","Delete synced data")+'</div></div>';
 }
 
 async function accountAction(action){
-  if(accountBusy || !accountClient)return;
-  if(["signin","signup","forgot","cancel-delete","delete"].includes(action)){
-    reauthDelete=action==="delete";
-    accountMode=reauthDelete || action==="cancel-delete" ? "signin" : action;
-    accountMessage=reauthDelete ? "Enter your password to permanently delete this account and its synced progress." : "";
-    accountViewChanged();
+  if(accountBusy || !hostedAccounts)return;
+  if(action==="retry"){
+    if(accountReady && accountUser)queueProgress();
+    else await initializeAccount();
     return;
   }
-  if(!accountUser)return;
+  if(!accountUser || !accountReady)return;
   const user=accountUser;
   const epoch=accountEpoch;
-  if(action==="retry"){
-    if(accountReady)queueProgress();else await useAccount(accountUser);
-    return;
-  }
   if(action==="reset" && !window.confirm("Reset all synced FrenchFeral progress?"))return;
+  if(action==="delete" && !window.confirm("Permanently delete your synced FrenchFeral data? Your ChatGPT account stays active."))return;
   accountBusy=true;
   try{
     await syncJob;
@@ -238,35 +173,36 @@ async function accountAction(action){
       if(JSON.stringify(cleanProgress(data))!==JSON.stringify(cleanProgress(remoteProgress.progress))){
         throw Error("Some progress is waiting to sync. Select Retry sync before signing out.");
       }
-      await checkedResult(accountClient.auth.signOut({scope:"local"}));
-      await useAccount(null);
-    }else{
-      const row=await checkedResult(progressRow(user));
-      if(epoch!==accountEpoch)return;
-      if(!row)throw Error("Couldn’t load your progress. Try reconnecting.");
-      if(action==="import" && row.imported_guest)throw Error("Guest progress has already been imported into this account.");
-      const changes=action==="import" ? {
-        progress:mergeProgress(row.progress,blank(),cleanProgress(guestProgress),true),imported_guest:true
-      } : {progress:blank(),generation:crypto.randomUUID()};
-      const written=await updateProgress(user,row,changes);
-      if(epoch!==accountEpoch)return;
-      if(!written)throw Error("Progress changed on another device. Try again.");
-      if(action==="import"){
-        guestProgress=blank();
-        saveGuestProgress();
-      }
-      remoteProgress=written;setPracticeData(cleanProgress(written.progress));
-      accountMessage=action==="import"?"Guest progress imported.":"Progress reset.";
+      window.top.location.href="/signout-with-chatgpt?return_to=%2F";
+      return;
     }
+    const row=await progressRow();
+    if(epoch!==accountEpoch)return;
+    if(action==="import" && row.imported_guest)throw Error("Guest progress has already been imported into this account.");
+    const changes=action==="import" ? {
+      progress:mergeProgress(row.progress,blank(),cleanProgress(guestProgress),true),imported_guest:true
+    } : {reset:true};
+    const written=await updateProgress(user,row,changes,action==="delete"?"DELETE":"PUT");
+    if(epoch!==accountEpoch)return;
+    if(!written)throw Error("Progress changed on another device. Try again.");
+    if(action==="import"){
+      guestProgress=blank();
+      saveGuestProgress();
+    }
+    remoteProgress=written;
+    setPracticeData(cleanProgress(written.progress));
+    accountMessage=action==="import"?"Guest progress imported.":action==="delete"?"Synced data deleted.":"Progress reset.";
   }catch(error){accountMessage=error.message || "Account request failed. Please try again.";}
   finally{accountBusy=false;accountViewChanged();}
 }
-function initializeAccount(){
-  if(!accountClient)return;
-  accountClient.auth.onAuthStateChange((event,authSession)=>{
-    if(event==="PASSWORD_RECOVERY"){accountMode="recovery";page="account";}
-    if(event==="INITIAL_SESSION" || event==="SIGNED_OUT" || event==="SIGNED_IN" || event==="PASSWORD_RECOVERY"){
-      setTimeout(()=>useAccount(authSession?.user ?? null),0);
-    }
-  });
+
+async function initializeAccount(){
+  if(!hostedAccounts)return;
+  try{
+    const session=await accountRequest("/api/session");
+    await useAccount(session.user);
+  }catch(error){
+    accountMessage=error.message;
+    accountViewChanged();
+  }
 }
